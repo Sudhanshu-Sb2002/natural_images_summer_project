@@ -15,7 +15,6 @@ def take_input(path):
     bl = rawdata['blPwrLfpTex'].astype(np.float32)
     freq = rawdata['freqVals'].astype(np.float32)
     electrode_names = rawdata['LFPElectrodes'].astype(np.int64)
-
     return st, bl, freq, electrode_names
 
 def cluster_grapher(k_vals, score_vals, name):
