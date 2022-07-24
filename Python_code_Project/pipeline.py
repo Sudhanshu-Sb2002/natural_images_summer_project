@@ -11,6 +11,12 @@ import matlab.engine
 import cv2 as cv
 import math
 from numba import njit, prange
+import torch as t
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from scipy.stats import pearsonr
+from scipy.optimize import curve_fit
 #%%
 matlab_needed=False
 if matlab_needed:
@@ -112,6 +118,7 @@ stRange = np.array([0.25, 0.5])
 # load    Spike and LFP    Information
 [analogChannelsStored, timeVals, goodStimPos, analogInputNums] = loadlfpInfo(folderLFP)
 [neuralChannelsStored, sourceUnitIDs] = loadspikeInfo(folderSpikes)
+timeVals_blSt=timeVals[np.logical_and(timeVals>=blRange[0],timeVals<=stRange[-1])]
 # Get RF details
 rfData = sio.loadmat(os.path.join(folderSourceString, 'data', 'rfData', subjectName, subjectName + gridType + 'RFData.mat'))
 # work with only high RMSE electrodes
@@ -136,7 +143,6 @@ rfStats =np.squeeze( sio.loadmat(os.path.join(folderSourceString,'data','rfData'
 #%% md
 # LFP and Spike stuff
 #%%
-
 def plotLFPData1Channel(plotHandles=None, channelString=[], stimulus_list=None, folderName=None, analysisType=None,
                         timeVals=None, plotColor=None, blRange=None, stRange=None, referenceChannelString=None,
                         badTrialNameStr=None, useCommonBadTrialsFlag=True ,**kwargs):
@@ -166,7 +172,7 @@ def plotLFPData1Channel(plotHandles=None, channelString=[], stimulus_list=None, 
 
     # get the stimulus shown
     parameterCombinations = loadParameterCombinations(folderExtract)['parameterCombinations']
-    signal=[None]*numElectrodes
+    signal=np.zeros(numElectrodes,dtype=object)
     for i in range(numElectrodes):
         # Get Signal
         analogData = np.squeeze(sio.loadmat(os.path.join(folderLFP, channelString[i]))["analogData"])
@@ -206,7 +212,10 @@ def plotLFPData1Channel(plotHandles=None, channelString=[], stimulus_list=None, 
         blPower = mean(logS(blPos, arange()), 1)
         logSBLAllConditions = repmat(blPower, length(xValToPlot), 1)
     '''
-    result=[[None]*numElectrodes]*numPlots
+    result=np.zeros((numPlots,numElectrodes),dtype=object)
+    if analysisType==6:
+        result=np.zeros((numPlots,numElectrodes,3,499))
+
     for i in range( numPlots):
         # get the good trials for each stimulus by removing the bad trials
         goodPos = np.setdiff1d(parameterCombinations[0, 0, 0, stimulus_list[i]], badTrials)
@@ -239,7 +248,7 @@ def plotLFPData1Channel(plotHandles=None, channelString=[], stimulus_list=None, 
                     plotHandles[i].plot(xs, np.zeros(1, len(xs)), 'color', 'k')
                     plotHandles[i].set_xlim(0,len(xs/2))
 
-                result[i][j]=[fftBL, fftST, fVals]
+                result[i][j]=np.array([fftBL, fftST, fVals])
 
             elif analysisType == 6 or analysisType == 7:
                 # plot the FFT of mean of trials
@@ -256,7 +265,7 @@ def plotLFPData1Channel(plotHandles=None, channelString=[], stimulus_list=None, 
                     plotHandles[i].plot(xs, np.zeros(1, len(xs)), color='k')
                     plotHandles[i].set_xlim(0, len(xs / 2))
 
-                result[i][j]=[fftERPBL,fftERPBL,fVals]
+                result[i][j]=np.array([fftERPBL,fftERPST,fVals])
             '''elif (analysisType == 8):
 
                 plotHandles[i].colormap('jet')
@@ -277,7 +286,7 @@ def plotLFPData1Channel(plotHandles=None, channelString=[], stimulus_list=None, 
                 # pcolor(plotHandles(i),xValToPlot,freqTF,10*(logS-logSBL)');
                 shading(plotHandles(i), 'interp')'''
 
-    return result
+    return np.array(result)
 #%%
 def custom_concat(array1):
     size=int(0)
@@ -300,10 +309,11 @@ def getPSTH_forp(X,tRange,d=0.001,Ntrials=1,smoothSigmaMs=None):
         d=d/1000
 
     spk = np.sort(X)
+
     #select only those values which lie between tRange[0] and tRange[-1]
 
     ind1 = np.argwhere(spk>=tRange[0])[0][0]
-    ind2 = X[-1]
+    ind2 = -1
     try:
         ind2=np.argwhere(spk>=tRange[-1])[0][0]
     except:
@@ -318,7 +328,7 @@ def getPSTH_forp(X,tRange,d=0.001,Ntrials=1,smoothSigmaMs=None):
     return psth,timeVals
 
 def plotSpikeData1Channel(plotHandles=None, channelNumber=None, stimulus_list=None, folderName=None, analysisType=None,
-                          timeVals=None, plotColor='g', unitID=None,badTrialNameStr="", plot=False):
+                          timeVals=None, plotColor='g', unitID=None,badTrialNameStr="", plot=False,bin_time=50):
     # plots the data for a single channel
     if unitID is None:
         unitID=np.ones(len(channelNumber),dtype=int)
@@ -327,7 +337,7 @@ def plotSpikeData1Channel(plotHandles=None, channelNumber=None, stimulus_list=No
     folderSegment = os.path.join(folderName, 'segmentedData')
     folderSpikes = os.path.join(folderSegment, 'Spikes')
     numPlots=len(stimulus_list)
-    result=[[None]*len(channelNumber)]*numPlots
+    return_value=np.zeros((numPlots,len(channelNumber),2,int(((timeVals[-1]-timeVals[0])*1000)/bin_time)))
     # get the stimuli
     parameterCombinations = loadParameterCombinations(folderExtract)['parameterCombinations']
     badTrialFileName = os.path.join(folderSegment
@@ -349,7 +359,7 @@ def plotSpikeData1Channel(plotHandles=None, channelNumber=None, stimulus_list=No
             print('image', str(stimulus_list[i]), ', electrode=', str(electrode))
 
             if analysisType == 2:
-                result[i][j]=getPSTH_forp(data,timeVals,d=10,Ntrials=Ntrials)
+                return_value[i][j]=getPSTH_forp(data,timeVals,d=bin_time,Ntrials=Ntrials)
                 if plot:
                     pass
             elif analysisType == 1:
@@ -358,19 +368,18 @@ def plotSpikeData1Channel(plotHandles=None, channelNumber=None, stimulus_list=No
                 if plot:
                     plotHandles[i].eventplot(X, colors='k')
                 return X
-    return result
+    return np.array(return_value)
 best_electrodes= np.squeeze(np.intersect1d(highRMSElectrodes[:-3],spikeChannels))
 best_electrode_names=['elec' + str(i+1) for i in best_electrodes]
 channelPos_names=[str(i) +", SID 1" for i in best_electrodes]
 channelNumber = best_electrodes
 stimValsToUse = np.array([i for i in range(32)])
 #%%
-# plotImageData(hImagesPlot,hImagePatchesPlot,rawImageFolder,fValsToUse,channelNumber,subjectName,plotColor);
 def plotImageData(hImagesPlot=None, hImagePatches=None, rawImageFolder="", fValsToUse=None, channelNumber=[1],
                   colorName='g', plottingDetails=None, rfStats=None,RFtype=None):
     plot = hImagesPlot is not None or hImagePatches is not None
     patchSizeDeg = 2
-    data = np.array([None] * len(fValsToUse), dtype='object')
+    data = np.zeros(len(fValsToUse), dtype='object')
 
     for i in range(len(fValsToUse)):
         imageFileName = os.path.join(rawImageFolder, 'Image' + str(fValsToUse[i] + 1) + '.png')
@@ -390,7 +399,7 @@ def plotImageData(hImagesPlot=None, hImagePatches=None, rawImageFolder="", fVals
                 hImagesPlot[i].set_ylabel('Degrees')
                 hImagePatches[i].set_xlabel('Degrees')
                 hImagePatches[i].set_ylabel('Degrees')
-    return data
+    return np.array(data)
 
 @njit(parallel=True)
 def twoDguassian(grid,x_0,y_0,sigma_x,sigma_y,A=1):
@@ -423,7 +432,7 @@ def getImagePatches_forpython(rfStats, imageFileName, electrodeList, patchSizeDe
     yResDeg = yAxisDeg[1] - yAxisDeg[0]
     xPosToTake =int( patchSizeDeg // xResDeg)
     yPosToTake = int(patchSizeDeg // yResDeg)
-    patchData = np.array([None] * numElectrodes, dtype='object')
+    patchData = np.zeros(numElectrodes, dtype='object')
     for i in range(numElectrodes):
         rfTMP = rfStats[electrodeList[i]]
         mAzi = np.squeeze(rfTMP["meanAzi"])
@@ -466,15 +475,14 @@ def getImageInDegrees(inputImage, monitorSpecifications, viewingDistanceCM):
     yAxisDeg = np.arange(-yDeg, yDeg, (2 * yDeg / imageYRes))[:imageYRes]
     return [xAxisDeg, yAxisDeg]
 
-
-
 #%%
 best_electrodes= np.squeeze(np.intersect1d(highRMSElectrodes[:-3],spikeChannels))
 best_electrode_names=['elec' + str(i+1) for i in best_electrodes]
 channelPos_names=[str(i) +", SID 1" for i in best_electrodes]
 channelNumber = best_electrodes
 stimValsToUse = np.array([i for i in range(32)])
-
+numStimulus=stimValsToUse.shape[0]
+numElectrodes=channelNumber.shape[0]
 #%%
 '''
 # electrodes and spikes
@@ -506,16 +514,44 @@ savepath=folderSourceString+"\\python_data"
 reload=False
 resave=True
 [imagePatches,imagePatches_e,imagePatches_g,imageFreqs,imageSpikes]=None,None,None,None,None
+if reload:    # electrodes and spikes
 
+    imageFreqs=plotLFPData1Channel(plotHandles=None, channelString=best_electrode_names, stimulus_list=stimValsToUse,analysisType=6,**kwargs)
+    imageSpikes=plotSpikeData1Channel(plotHandles=None, channelNumber=channelNumber, stimulus_list=stimValsToUse,folderName=folderName,analysisType=2,timeVals=[blRange[0],stRange[-1]],bin_time=50)
+
+    if resave:
+         np.savez_compressed(savepath+"\\freq_and_spikes.npz",imageFreqs=imageFreqs,imageSpikes=imageSpikes)
+
+    imagePatches=plotImageData(fValsToUse=stimValsToUse,channelNumber=channelNumber,colorName='g',
+                               rawImageFolder=rawImageFolder,rfStats=rfStats,RFtype=None)
+    if resave:
+        np.savez_compressed(savepath+"\\image_patches.npz",imagePatches=imagePatches)
+
+    imagePatches_e = plotImageData(fValsToUse=stimValsToUse, channelNumber=channelNumber, colorName='g',
+                                   rawImageFolder=rawImageFolder, rfStats=rfStats, RFtype='ellipse')
+    if resave:
+        np.savez_compressed(savepath+"\\image_patches_e.npz",imagePatches_e=imagePatches_e)
+
+    imagePatches_g = plotImageData(fValsToUse=stimValsToUse, channelNumber=channelNumber, colorName='g',
+                               rawImageFolder=rawImageFolder, rfStats=rfStats, RFtype='gaussian')
+    if resave:
+        np.savez_compressed(savepath+"\\image_patches_g.npz",imagePatches_g=imagePatches_g)
+
+import antropy as ent
 #%%
 # import frequencies and spikes
 spikes_freqs=np.load(savepath + "\\freq_and_spikes.npz", allow_pickle=True)
 imageFreqs=spikes_freqs["imageFreqs"]
-imageSpikes_bl=spikes_freqs["imageSpikes_bl"]
-imageSpikes_st=spikes_freqs["imageSpikes_st"]
-#import elipitical image patches
-imagePatches_e=np.load(savepath+"\\image_patches_e.npz",allow_pickle=True)["imagePatches_e"]
-#%%
-imageSpikes_st=plotSpikeData1Channel(plotHandles=None, channelNumber=channelNumber, stimulus_list=stimValsToUse,folderName=folderName,analysisType=2,timeVals=stRange)
-imageSpikes_bl=plotSpikeData1Channel(plotHandles=None, channelNumber=channelNumber, stimulus_list=stimValsToUse,folderName=folderName,analysisType=2,timeVals=blRange)
-np.savez_compressed(savepath+"\\freq_and_spikes.npz",imageFreqs=imageFreqs,imageSpikes_st=imageSpikes_st,imageSpikes_bl=imageSpikes_bl)
+imageSpikes=spikes_freqs["imageSpikes"]
+f_values=np.array(imageFreqs[0][0][2].astype(int))
+index_80=np.argwhere(f_values==80)[0][0]
+f_baseline_80=np.array(np.average(imageFreqs[:,:,0,:index_80],axis=0))
+f_stimulus_80=np.array(imageFreqs[:,:,1,:index_80])
+entropies=np.zeros((numStimulus,numElectrodes,3))
+for i in range(numStimulus):
+    for j in range(numElectrodes):
+        entropies[i][j][0]=ent.svd_entropy(f_stimulus_80[i][j])/ent.svd_entropy(f_baseline_80[j])
+        entropies[i][j][1]=ent.hjorth_params(f_stimulus_80[i][j])[1]/ent.hjorth_params(f_baseline_80[j])[1]
+        entropies[i][j][2]=ent.katz_fd(f_stimulus_80[i][j])/ent.katz_fd(f_baseline_80[j])
+
+print("hi")
