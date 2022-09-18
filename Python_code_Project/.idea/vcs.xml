@@ -2,5 +2,7 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="$PROJECT_DIR$/.." vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/U-Net-Pred" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/URAN/U-Net-Pred" vcs="Git" />
   </component>
 </project>
